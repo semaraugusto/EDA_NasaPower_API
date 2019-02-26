@@ -1,0 +1,177 @@
+---
+title: "Desafio Solarview"
+author: "Semar Augusto"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r, warning=FALSE, include=F}
+library(tidyverse)
+library(rgdal)
+library(reshape2)
+library(tseries)
+library(forecast)
+library(RColorBrewer)  # for brewer.pal(...)
+```
+
+
+# Data loading
+
+```{r}
+states <- readOGR("UFEBRASIL.shp", encoding = "UTF-8")
+df <- read.csv("radiacao_sql.csv", encoding = "UTF-8")
+```
+
+# Initial Description
+
+```{r}
+summary(df)
+
+means <- as.data.frame((apply(df[,4:16], 2, mean)))
+colnames(means) <- "Mean"
+means$names <- factor(c(month.name, "Annual"), levels=c(month.name, "Annual"))
+ggplot(means, aes(x = names, y = Mean)) + geom_bar(stat='identity')
+```
+
+I would expect that there would be a big difference in the mean and median whilst comparing winter and summer time. It seems not to be the case. However, Brazil is a big country and has a big part of its land area in the Equador. Let's check if in a smaller region further away from Equador will express this difference.
+
+```{r}
+sc <- subset(df, STATE == "SANTA CATARINA")
+summary(sc)
+means <- as.data.frame((apply(sc[,4:16], 2, mean)))
+colnames(means) <- "Mean"
+means$names <- factor(c(month.name, "Annual"), levels=c(month.name, "Annual"))
+ggplot(means, aes(x = names, y = Mean)) + geom_bar(stat='identity')
+rm(sc)
+```
+
+As expected, a region further away from the Equador has bigger differences between summer and winter.
+
+We'll check now if by taking a a state closer to Equador will have simillar difference. That would mean that the fact that there is little difference overall in Brazil is due to a sum of variabilities
+
+```{r}
+am <- subset(df, STATE == "AMAZONAS")
+summary(am)
+means <- as.data.frame((apply(am[,4:16], 2, mean)))
+colnames(means) <- "Mean"
+means$names <- factor(c(month.name, "Annual"), levels=c(month.name, "Annual"))
+ggplot(means, aes(x = names, y = Mean)) + geom_bar(stat='identity')
+rm(am)
+```
+
+As expected there is actually little variability in a state close to Equador.
+
+```{r}
+df1 <- df
+df1 <- aggregate(df1[,16], by=list(df1$YEAR), mean)
+colnames(df1)[1] <- "YEAR"
+ggplot(df1, aes(x=YEAR, y=x)) + geom_line()
+```
+
+Solar radiation seems to have pumped up by 1995 and hasn't come down since.
+
+# Time Series Analysis
+
+I'll transform the data frame in order to each month be a line. That will make it easier on the time series algorithms.
+```{r}
+df1 <- select(df, -"ANN")
+df1 <- subset(df, STATE == "MINAS GERAIS")
+df1 <- aggregate(df1[4:15], by=list(df1$YEAR, df1$STATE), mean)
+colnames(df1)[1] <- "YEAR"
+colnames(df1)[2] <- "STATE"
+df1 <- melt(df1, id.vars=c("YEAR", "STATE"))
+
+tsdf <- ts(df1[, c("value")])
+tsdf <- ts(as.vector(tsdf), start = c(1984,1), frequency = 12)
+
+components.ts <-  decompose(tsdf)
+plot(components.ts$x)
+```
+
+```{r}
+plot(components.ts$random)
+```
+
+```{r}
+decomp = stl(tsdf, s.window="periodic")
+plot(decomp) 
+```
+
+# Prediction
+
+We'd like to predict what the next two years of radiation will be like. In order to do so, a ARIMA model is very common.
+
+However, it requires stationary data. Let's check if that is the case in our dataset.
+```{r}
+adf.test(tsdf, alternative = "stationary")
+```
+
+The formal ADF test does not reject null hypothesis, which means the dataset used is most likely a non-stationary one.
+
+```{r}
+Acf(tsdf, main='ACF for Differenced Series')
+Pacf(tsdf, main='PACF for Differenced Series') 
+```
+
+
+We'll use seasadj function to try to remove seasonality
+```{r}
+deseasonal_cnt <- seasadj(decomp)
+count_d1 = diff(deseasonal_cnt, differences = 1)
+plot(count_d1)
+adf.test(count_d1, alternative = "stationary")
+```
+
+```{r}
+Acf(count_d1, main='ACF for Differenced Series')
+Pacf(count_d1, main='PACF for Differenced Series') 
+```
+
+Got our stationary dataset. Let's proceed with the prediction process
+
+# Predicting next two years
+
+```{r}
+fit_ts <- auto.arima(deseasonal_cnt, seasonal=FALSE)
+fit_ts2 <- ets(tsdf)
+fit_ts
+fit_ts2
+```
+
+Arima model has better AIC, AICc and BIC, we'll proceed with it.
+
+```{r}
+tsdisplay(residuals(fit_ts), lag.max=45, main='(1,1,1) Model Residuals') 
+```
+
+```{r}
+fcast <- forecast(fit_ts, h=24)
+plot(fcast)
+```
+
+# Spatial Description
+
+```{r}
+df1 <- subset(df, YEAR == 2005)
+df3 <- df1[complete.cases(df1), c("LON", "LAT", "DEC")]
+ggplot(df3[complete.cases(df3),], aes(x=LON, y=LAT, color=DEC)) + 
+    ggtitle("Solar Radiation at December 2005") + 
+    geom_point()+
+    geom_path(data=states,aes(x=long, y=lat,group=group), colour="grey50")+
+    scale_fill_gradientn(colours=rev(brewer.pal(7,"Spectral")))+
+    coord_fixed()
+```
+
+```{r}
+df4 <- df1[complete.cases(df1), c("LON", "LAT", "JUN")]
+ggplot(df4[complete.cases(df4),], aes(x=LON, y=LAT, color=JUN)) + 
+    ggtitle("Solar Radiation at June 2005") + 
+    geom_point()+
+    geom_path(data=states,aes(x=long, y=lat,group=group), colour="grey50")+
+    scale_fill_gradientn(colours=rev(brewer.pal(7,"Spectral")))+
+    coord_fixed()
+```
+
+
+
